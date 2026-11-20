@@ -1,0 +1,6 @@
+.clasp.json
+.clasprc.json
+.env
+.env.*
+DxDiag.txt
+node_modules/
