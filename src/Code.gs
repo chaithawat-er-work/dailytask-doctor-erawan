@@ -20,12 +20,20 @@ const SHEETS = {
 const SHIFTS = ['เช้า', 'บ่าย', 'อื่นๆ', 'ทั้งวัน'];
 const TRAINEE_TYPES = ['Fellow', 'Resident', 'ENP', 'Paramedic'];
 const LOCATIONS = ['ในศูนย์เอราวัณ', 'นอกสถานที่'];
+const MEETING_LOCATIONS = Object.freeze({
+  'ประชุมในเอราวัณประจำ': LOCATIONS[0],
+  'ประชุมในเอราวัณไม่ประจำ': LOCATIONS[0],
+  'ประชุมนอกเอราวัณประจำ': LOCATIONS[1],
+  'ประชุมนอกเอราวัณไม่ประจำ': LOCATIONS[1],
+  'ประชุมออนไลน์ประจำ': 'ออนไลน์',
+});
 const TZ = 'Asia/Bangkok';
 const THAI_DAYS = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
 const THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
 
 // Location ต่อท้ายสุด เพื่อไม่ให้กระทบข้อมูลเดิมที่มีอยู่แล้ว
 const SCHEDULE_HEADER = ['ID', 'Date', 'Name', 'Shift', 'Activity', 'Note', 'RecordedBy', 'Timestamp', 'Location'];
+const MEETING_HEADER = 'MeetingType';
 const TRAINEE_HEADER = ['ID', 'Date', 'Type', 'Institution', 'Count', 'Note', 'RecordedBy', 'Timestamp'];
 const STAFF_HEADER = ['Name', 'Role', 'Email', 'Active', 'Order'];
 const CONFIG_HEADER = ['Key', 'Value', 'Description'];
@@ -47,6 +55,7 @@ function setup() {
   }
 
   const sched = getOrCreateSheet_(ss, SHEETS.SCHEDULE, SCHEDULE_HEADER);
+  ensureMeetingColumn_(sched);
   applyScheduleValidation(sched);
   getOrCreateSheet_(ss, SHEETS.TRAINEE, TRAINEE_HEADER);
 
@@ -90,8 +99,53 @@ function applyScheduleValidation(sh) {
     .requireValueInRange(staffSh.getRange('A2:A'), true).setAllowInvalid(false).build());
   sh.getRange(2, col('Shift'), n).setDataValidation(SpreadsheetApp.newDataValidation()
     .requireValueInList(SHIFTS, true).setAllowInvalid(false).build());
-  sh.getRange(2, col('Location'), n).setDataValidation(SpreadsheetApp.newDataValidation()
-    .requireValueInList(LOCATIONS, true).setAllowInvalid(false).build());
+  applyScheduleLocationValidation_(sh, col('Location'), col(MEETING_HEADER));
+}
+
+function applyScheduleLocationValidation_(sh, locationCol, meetingCol) {
+  const n = sh.getMaxRows() - 1;
+  sh.getRange(2, locationCol, n).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList(meetingCol ? LOCATIONS.concat('ออนไลน์') : LOCATIONS, true).setAllowInvalid(false).build());
+  if (meetingCol) {
+    sh.getRange(2, meetingCol, n).setDataValidation(SpreadsheetApp.newDataValidation()
+      .requireValueInList(Object.keys(MEETING_LOCATIONS), true).setAllowInvalid(false).build());
+  }
+}
+
+/** อัปเกรดชีต Schedule เดิมจากตัวแก้ไข Apps Script โดยไม่เรียก setup หรือสร้าง trigger ใหม่ */
+function setupMeetingTypes() {
+  requireAdmin_();
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sh = sheet_(SHEETS.SCHEDULE);
+    ensureMeetingColumn_(sh);
+    applyScheduleLocationValidation_(sh, SCHEDULE_HEADER.length, SCHEDULE_HEADER.length + 1);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function scheduleHasMeetingColumn_(sh) {
+  const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  if (SCHEDULE_HEADER.some((header, i) => headers[i] !== header)) {
+    throw new Error('หัวคอลัมน์ชีต Schedule ไม่ตรงกับโครงสร้างที่ระบบรองรับ');
+  }
+  const meetingIndex = headers.indexOf(MEETING_HEADER);
+  if (meetingIndex >= 0 && meetingIndex !== SCHEDULE_HEADER.length) {
+    throw new Error('คอลัมน์ MeetingType ต้องอยู่ถัดจาก Location');
+  }
+  return meetingIndex >= 0;
+}
+
+function ensureMeetingColumn_(sh) {
+  if (scheduleHasMeetingColumn_(sh)) return;
+  if (sh.getLastColumn() !== SCHEDULE_HEADER.length) {
+    throw new Error('พบคอลัมน์เพิ่มเติมในชีต Schedule กรุณาตรวจโครงสร้างก่อนเพิ่ม MeetingType');
+  }
+  const column = SCHEDULE_HEADER.length + 1;
+  if (sh.getMaxColumns() < column) sh.insertColumnAfter(column - 1);
+  sh.getRange(1, column).setValue(MEETING_HEADER).setFontWeight('bold').setBackground('#dbe9f6');
 }
 
 /**
@@ -214,6 +268,8 @@ function apiGetMeta() {
     shifts: SHIFTS,
     traineeTypes: TRAINEE_TYPES,
     locations: LOCATIONS,
+    meetingLocations: MEETING_LOCATIONS,
+    meetingTypesEnabled: scheduleHasMeetingColumn_(sheet_(SHEETS.SCHEDULE)),
     user: Session.getActiveUser().getEmail() || 'anonymous',
     isAdmin: isAdmin_(),
     today: fmtDate_(new Date()),
@@ -224,15 +280,18 @@ function apiGetMeta() {
 function apiSaveSchedule(item) {
   validate_(item, ['date', 'name', 'shift']);
   if (SHIFTS.indexOf(item.shift) < 0) throw new Error('Shift ไม่ถูกต้อง');
-  if (item.location && LOCATIONS.indexOf(item.location) < 0) throw new Error('สถานที่ไม่ถูกต้อง');
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
     const sh = sheet_(SHEETS.SCHEDULE);
-    const user = Session.getActiveUser().getEmail() || 'anonymous';
-    const row = [item.id || Utilities.getUuid(), item.date, item.name.trim(), item.shift,
-      (item.activity || '').trim(), (item.note || '').trim(), user, new Date(), item.location || LOCATIONS[0]];
+    const hasMeetingColumn = scheduleHasMeetingColumn_(sh);
     const r = item.id ? findRowById_(sh, item.id) : -1;
+    const meetingType = item.meetingType === undefined && hasMeetingColumn && r > 0
+      ? sh.getRange(r, SCHEDULE_HEADER.length + 1).getValue()
+      : item.meetingType;
+    item = normalizeScheduleMeeting_({ ...item, meetingType }, hasMeetingColumn);
+    const user = Session.getActiveUser().getEmail() || 'anonymous';
+    const row = scheduleRow_(item, item.date, item.name.trim(), user, new Date(), hasMeetingColumn, item.id);
     if (r > 0) sh.getRange(r, 1, 1, row.length).setValues([row]);
     else sh.appendRow(row);
     return { ok: true, id: row[0] };
@@ -248,25 +307,25 @@ function apiSaveScheduleRange(item) {
   if (to < from) throw new Error('วันสิ้นสุดต้องไม่ก่อนวันเริ่ม');
   if ((to - from) / 864e5 > 62) throw new Error('ช่วงวันเกิน 62 วัน');
   if (SHIFTS.indexOf(item.shift) < 0) throw new Error('Shift ไม่ถูกต้อง');
-  if (item.location && LOCATIONS.indexOf(item.location) < 0) throw new Error('สถานที่ไม่ถูกต้อง');
+  const sh = sheet_(SHEETS.SCHEDULE);
+  const hasMeetingColumn = scheduleHasMeetingColumn_(sh);
+  item = normalizeScheduleMeeting_(item, hasMeetingColumn);
   const user = Session.getActiveUser().getEmail() || 'anonymous';
   const now = new Date();
-  const rows = dateList_(from, to).map(dt => [Utilities.getUuid(), dt, item.name.trim(), item.shift,
-    (item.activity || '').trim(), (item.note || '').trim(), user, now, item.location || LOCATIONS[0]]);
-  appendRows_(sheet_(SHEETS.SCHEDULE), rows);
+  const rows = dateList_(from, to).map(dt => scheduleRow_(item, dt, item.name.trim(), user, now, hasMeetingColumn));
+  appendRows_(sh, rows);
   return { ok: true, count: rows.length };
 }
 
 /**
  * บันทึกงานเดียวให้แพทย์หลายคน (และหลายวัน) ในครั้งเดียว
- * item: { names:[], dateFrom, dateTo, shift, activity, note, location, notify }
+ * item: { names:[], dateFrom, dateTo, shift, activity, note, location, meetingType, notify }
  */
 function apiSaveScheduleBulk(item) {
   validate_(item, ['dateFrom', 'shift', 'activity']);
   const names = (item.names || []).map(n => String(n).trim()).filter(Boolean);
   if (!names.length) throw new Error('กรุณาเลือกแพทย์อย่างน้อย 1 คน');
   if (SHIFTS.indexOf(item.shift) < 0) throw new Error('Shift ไม่ถูกต้อง');
-  if (item.location && LOCATIONS.indexOf(item.location) < 0) throw new Error('สถานที่ไม่ถูกต้อง');
   const staff = getStaff_();
   const unknown = names.filter(n => !staff.some(s => s.Name === n));
   if (unknown.length) throw new Error('ไม่พบชื่อในชีต Staff: ' + unknown.join(', '));
@@ -275,17 +334,37 @@ function apiSaveScheduleBulk(item) {
   if (to < from) throw new Error('วันสิ้นสุดต้องไม่ก่อนวันเริ่ม');
   if ((to - from) / 864e5 > 62) throw new Error('ช่วงวันเกิน 62 วัน');
 
+  const sh = sheet_(SHEETS.SCHEDULE);
+  const hasMeetingColumn = scheduleHasMeetingColumn_(sh);
+  item = normalizeScheduleMeeting_(item, hasMeetingColumn);
   const user = Session.getActiveUser().getEmail() || 'anonymous';
   const now = new Date();
   const dates = dateList_(from, to);
   const rows = [];
-  dates.forEach(dt => names.forEach(n => rows.push([Utilities.getUuid(), dt, n, item.shift,
-    (item.activity || '').trim(), (item.note || '').trim(), user, now, item.location || LOCATIONS[0]])));
-  appendRows_(sheet_(SHEETS.SCHEDULE), rows);
+  dates.forEach(dt => names.forEach(n => rows.push(scheduleRow_(item, dt, n, user, now, hasMeetingColumn))));
+  appendRows_(sh, rows);
 
   let mailed = 0;
   if (item.notify) mailed = notifyAssignees_(names, dates, item, staff);
   return { ok: true, count: rows.length, days: dates.length, people: names.length, mailed: mailed };
+}
+
+function normalizeScheduleMeeting_(item, hasMeetingColumn) {
+  const meetingType = item.meetingType || '';
+  if (meetingType && (typeof meetingType !== 'string' || !Object.prototype.hasOwnProperty.call(MEETING_LOCATIONS, meetingType))) {
+    throw new Error('ประเภทการประชุมไม่ถูกต้อง');
+  }
+  if (meetingType && !hasMeetingColumn) throw new Error('กรุณาให้ผู้ดูแลเปิดใช้ประเภทการประชุมในชีต Schedule ก่อน');
+  const location = meetingType ? MEETING_LOCATIONS[meetingType] : (item.location || LOCATIONS[0]);
+  if (!meetingType && !LOCATIONS.includes(location)) throw new Error('สถานที่ไม่ถูกต้อง');
+  return { ...item, meetingType, location };
+}
+
+function scheduleRow_(item, date, name, user, now, hasMeetingColumn, id) {
+  const row = [id || Utilities.getUuid(), date, name, item.shift, (item.activity || '').trim(),
+    (item.note || '').trim(), user, now, item.location];
+  if (hasMeetingColumn) row.push(item.meetingType);
+  return row;
 }
 
 /** ส่งเมลแจ้งแพทย์ที่ถูกมอบหมายงาน (เฉพาะคนที่มี Email ในชีต Staff) */
@@ -300,6 +379,7 @@ function notifyAssignees_(names, dates, item, staff) {
     <h2 style="margin:0 0 10px">มีงานใหม่ในตาราง</h2>
     <table cellpadding="6" cellspacing="0" border="1" style="border-collapse:collapse;border-color:#ccc">
       <tr><td><b>กิจกรรม</b></td><td>${esc_(item.activity)}</td></tr>
+      ${item.meetingType ? `<tr><td><b>ประเภทการประชุม</b></td><td>${esc_(item.meetingType)}</td></tr>` : ''}
       <tr><td><b>วันที่</b></td><td>${esc_(when)}${dates.length > 1 ? ' (' + dates.length + ' วัน)' : ''}</td></tr>
       <tr><td><b>ช่วงเวลา</b></td><td>${esc_(item.shift)}</td></tr>
       <tr><td><b>สถานที่</b></td><td>${item.location === 'นอกสถานที่' ? '🚗 ' : ''}${esc_(item.location || LOCATIONS[0])}</td></tr>
@@ -535,16 +615,20 @@ function renderCalendar(weeksBack, weeksForward) {
 // ====================== PART 3: EMAIL NOTIFY ======================
 /** ส่งสรุปตารางวันพรุ่งนี้ (ข้ามถ้าพรุ่งนี้เป็นเสาร์/อาทิตย์และไม่มีรายการ) */
 function sendTomorrowDigest() {
-  const t = new Date(); t.setDate(t.getDate() + 1);
-  const dt = fmtDate_(t);
-  const week = apiGetWeek(dt, 1);
-  const day = week.days[0];
-  const hasAny = day.staff.some(s => Object.values(s.shifts).some(a => a.length)) || day.trainee.some(x => x.items.length);
-  if (!hasAny && (t.getDay() === 0 || t.getDay() === 6)) return;
+  const digest = tomorrowDigest_(new Date());
+  if (digest) sendMail_(digest.subject, digest.html, digest.day);
+}
 
-  const subject = `[${getConfig_('ORG_NAME', '')}] ตารางแพทย์วันพรุ่งนี้ ${day.label} ${t.getFullYear() + 543}`;
-  const html = buildDigestHtml_(`ตารางการทำงานวันพรุ่งนี้`, [day]);
-  sendMail_(subject, html, day);
+function tomorrowDigest_(now) {
+  const tomorrow = new Date(fmtDate_(now) + 'T00:00:00Z');
+  tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+  const dt = tomorrow.toISOString().slice(0, 10);
+  const [day] = buildDays_([dt]);
+  const hasAny = day.staff.some(s => Object.values(s.shifts).some(a => a.length)) || day.trainee.some(x => x.items.length);
+  if (!hasAny && (day.dow === 0 || day.dow === 6)) return null;
+
+  const subject = `[${getConfig_('ORG_NAME', '')}] ตารางแพทย์วันพรุ่งนี้ ${day.label} ${tomorrow.getUTCFullYear() + 543}`;
+  return { subject, html: buildDigestHtml_('ตารางการทำงานวันพรุ่งนี้', [day]), day };
 }
 
 /** ส่งสรุปสัปดาห์หน้า (จันทร์–ศุกร์) — รันเช้าวันอาทิตย์ */
@@ -573,7 +657,7 @@ function buildDigestHtml_(title, days) {
       const xs = Object.values(s.shifts).flat().filter(isOffsite_);
       return xs.length ? `${esc_(s.name)} (${xs.map(x => esc_(x.Activity || x.Shift)).join(', ')})` : '';
     }).filter(Boolean);
-    h += `<p style="margin:6px 0 0"><b>🚗 นอกสถานที่:</b> ${off.length ? off.join(' · ') : '<span style="color:#888">ไม่มี — ทุกท่านอยู่ในศูนย์เอราวัณ</span>'}</p>`;
+    h += `<p style="margin:6px 0 0"><b>🚗 นอกสถานที่:</b> ${off.length ? off.join(' · ') : '<span style="color:#888">ไม่มีรายการนอกสถานที่</span>'}</p>`;
     const tr = day.trainee.filter(x => x.items.length);
     if (tr.length) {
       h += `<p style="margin:6px 0 0"><b>แพทย์ elective:</b> ` +
@@ -696,7 +780,10 @@ function thaiDate_(s) {
 function isOffsite_(x) { return x && x.Location === 'นอกสถานที่'; }
 
 /** ข้อความในช่องตาราง: ใส่ 🚗 นำหน้าถ้านอกสถานที่ */
-function label_(x) { return (isOffsite_(x) ? '🚗 ' : '') + (x.Activity || x.Shift); }
+function label_(x) {
+  const label = (isOffsite_(x) ? '🚗 ' : '') + (x.Activity || x.Shift);
+  return x.MeetingType ? label + ' (' + x.MeetingType + ')' : label;
+}
 
 function esc_(s) {
   return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));

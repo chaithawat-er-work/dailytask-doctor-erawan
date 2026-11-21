@@ -55,6 +55,7 @@
   .seg label:has(input:checked){border-color:var(--blue);background:#eef4ff;font-weight:600}
   .item.off{background:#fde8d7}
   .item.off:hover{background:#fbd6b8}
+  .item.online,.item.online:hover{background:#e5dafb;color:#38235e}
   .legend{font-size:12px;color:var(--muted);margin-left:auto}
   /* view toggle */
   .seg-toggle{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff}
@@ -79,6 +80,7 @@
   .hb{flex:1;border-radius:3px;background:transparent}
   .hb.in{background:#b9d3fb}
   .hb.off{background:#f6a96b}
+  .hb.online{background:#c6aded}
   .hb.leave{background:repeating-linear-gradient(45deg,#d1d5db 0 3px,#eceef1 3px 6px)}
   .mc .dot{position:absolute;right:3px;top:3px;width:5px;height:5px;border-radius:50%;background:#6b7280}
   .sum{white-space:nowrap;padding:0 10px!important;color:#4b5563;font-size:12px;text-align:left!important;border-left:1px solid var(--line)}
@@ -158,7 +160,7 @@
       <strong id="weekTitle"></strong>
       <button class="ghost" onclick="openExport()">⬇️ ส่งออก</button>
       <span class="hint" id="loading"></span>
-      <span class="legend" id="weekLegend"><span class="item">ในศูนย์เอราวัณ</span> <span class="item off">🚗 นอกสถานที่</span></span>
+      <span class="legend" id="weekLegend"><span class="item">ในศูนย์เอราวัณ</span> <span class="item off">🚗 นอกสถานที่</span> <span class="item online">ออนไลน์</span></span>
     </div>
     <div class="grid" id="grid"></div>
     <div id="monthBox" class="hidden">
@@ -167,6 +169,7 @@
         <span><span class="half"><span></span><span></span></span>ครึ่งบน = เช้า · ครึ่งล่าง = บ่าย</span>
         <span><i style="background:#b9d3fb"></i>ในศูนย์เอราวัณ</span>
         <span><i style="background:#f6a96b"></i>นอกสถานที่</span>
+        <span><i style="background:#c6aded"></i>ออนไลน์</span>
         <span><i style="background:repeating-linear-gradient(45deg,#d1d5db 0 3px,#eceef1 3px 6px)"></i>ลา</span>
         <span><i style="width:6px;height:6px;border-radius:50%;background:#6b7280"></i>มีงานช่วงอื่นๆ</span>
         <span>ช่องว่าง = ไม่มีรายการ · คลิกช่องเพื่อดูรายละเอียด</span>
@@ -236,9 +239,13 @@
           </label>
         </div>
         <div class="row">
+          <label id="s_meetingRow" class="hidden">ประเภทการประชุม
+            <select id="s_meeting" onchange="syncMeetingLocation()"></select>
+          </label>
           <div style="flex:1;min-width:140px">
             <div class="hint" style="margin-bottom:4px">สถานที่</div>
             <div class="seg" id="s_loc"></div>
+            <div id="s_meetingLocation" class="hidden" aria-live="polite"></div>
           </div>
         </div>
         <div class="row"><label>หมายเหตุ <textarea id="s_note"></textarea></label></div>
@@ -312,6 +319,9 @@
       $('t_type').innerHTML = META.traineeTypes.map(s => `<option>${s}</option>`).join('');
       $('s_loc').innerHTML = META.locations.map((l, i) =>
         `<label><input type="radio" name="s_loc" value="${l}" ${i === 0 ? 'checked' : ''}>${i === 0 ? '🏢' : '🚗'} ${l}</label>`).join('');
+      $('s_meeting').innerHTML = '<option value="">งานทั่วไป / ไม่ระบุ</option>' +
+        Object.keys(META.meetingLocations || {}).map(x => `<option>${esc(x)}</option>`).join('');
+      $('s_meetingRow').classList.toggle('hidden', !META.meetingTypesEnabled);
       $('s_date').value = $('t_date').value = META.today;
       CUR = META.today;
       setView(VIEW);
@@ -354,8 +364,12 @@
 
   // ---------- month view ----------
   const LEAVE_RE = /^ลา|ลา(พัก|ป่วย|กิจ|คลอด|บวช|ศึกษา)/;
-  const catOf = it => LEAVE_RE.test(it.Activity || '') ? 'leave' : (it.Location === 'นอกสถานที่' ? 'off' : 'in');
-  const RANK = { leave: 3, off: 2, in: 1 };
+  const catOf = it => {
+    if (it.Location === 'ออนไลน์') return 'online';
+    if (LEAVE_RE.test(it.Activity || '') && !it.MeetingType) return 'leave';
+    return it.Location === 'นอกสถานที่' ? 'off' : 'in';
+  };
+  const RANK = { leave: 4, off: 3, online: 2, in: 1 };
   const worst = items => items.reduce((c, it) => { const k = catOf(it); return !c || RANK[k] > RANK[c] ? k : c; }, '');
 
   function renderMonth() {
@@ -381,7 +395,7 @@
         if (all.some(x => catOf(x) === 'off')) offDays++;
         if (all.some(x => catOf(x) === 'leave')) leaveDays++;
         const tip = [['เช้า', am], ['บ่าย', pm], ['อื่นๆ', other]].filter(x => x[1].length)
-          .map(x => x[0] + ': ' + x[1].map(it => (catOf(it) === 'off' ? '🚗 ' : '') + (it.Activity || '')).join(', ')).join('\n');
+          .map(x => x[0] + ': ' + x[1].map(itemText).join(', ')).join('\n');
         const wk = i > 0 && (d.dow === 1 || days[i - 1].dow > d.dow) ? ' wk' : '';
         h += `<td class="${wk}${d.dow === 0 || d.dow === 6 ? ' we' : ''}${d.date === META.today ? ' today' : ''}">
           <div class="mc" title="${esc(d.label + (tip ? '\n' + tip : ''))}" onclick="openDay('${d.date}')">
@@ -420,7 +434,11 @@
   }
 
   function itemText(it) {
-    return (catOf(it) === 'off' ? '🚗 ' : '') + (it.Activity || it.Shift) + (it.Note ? ' (' + it.Note + ')' : '');
+    return scheduleLabel(it) + (it.Note ? ' (' + it.Note + ')' : '');
+  }
+  function scheduleLabel(it) {
+    const label = (it.Location === 'นอกสถานที่' ? '🚗 ' : '') + (it.Activity || it.Shift);
+    return it.MeetingType ? label + ' (' + it.MeetingType + ')' : label;
   }
   function cellHtml(items) {
     if (!items.length) return '<span style="color:#bbb">–</span>';
@@ -523,7 +541,7 @@
       const rows = SHIFT_ORDER.map(k => [k, s.shifts[k]]).filter(x => x[1].length);
       b += `<div class="dd-doc"><b>${esc(s.name)}</b>${rows.length ? rows.map(([k, items]) =>
         `<div class="dd-row"><span class="k">${k}</span><span>${items.map(it =>
-          `<span class="item ${catOf(it) === 'in' ? '' : catOf(it)}" onclick='closeDay();editItem(${JSON.stringify(it).replace(/'/g, '&#39;')})'>${catOf(it) === 'off' ? '🚗 ' : ''}${esc(it.Activity || it.Shift)}</span>`).join(' ')}</span></div>`).join('')
+          `<span class="item ${catOf(it)}" onclick='closeDay();editItem(${esc(JSON.stringify(it))})'>${esc(scheduleLabel(it))}</span>`).join(' ')}</span></div>`).join('')
         : '<div class="dd-row"><span class="empty">ไม่มีรายการ</span></div>'}</div>`;
     });
     const tr = day.trainee.filter(t => t.items.length);
@@ -546,7 +564,7 @@
           // 'ทั้งวัน' แสดงทั้งช่องเช้าและบ่าย
           const items = s.shifts[sh].concat(sh === 'เช้า' || sh === 'บ่าย' ? s.shifts['ทั้งวัน'] : []);
           return `<div class="shift"><span class="k">${sh}</span><span>${items.length ? items.map(it =>
-            `<span class="item ${isDir ? 'dir' : ''} ${it.Location === 'นอกสถานที่' ? 'off' : ''}" title="${esc((it.Location || 'ในศูนย์เอราวัณ') + (it.Note ? ' · ' + it.Note : ''))}" onclick='editItem(${JSON.stringify(it).replace(/'/g, '&#39;')})'>${it.Location === 'นอกสถานที่' ? '🚗 ' : ''}${esc(it.Activity || it.Shift)}${it.Shift === 'ทั้งวัน' ? ' <small>(ทั้งวัน)</small>' : ''}</span>`).join(' ') : '<span class="empty">–</span>'}</span></div>`;
+            `<span class="item ${isDir ? 'dir' : ''} ${catOf(it)}" title="${esc((it.Location || 'ในศูนย์เอราวัณ') + (it.Note ? ' · ' + it.Note : ''))}" onclick='editItem(${esc(JSON.stringify(it))})'>${esc(scheduleLabel(it))}${it.Shift === 'ทั้งวัน' ? ' <small>(ทั้งวัน)</small>' : ''}</span>`).join(' ') : '<span class="empty">–</span>'}</span></div>`;
         };
         return `<div class="doc"><div class="nm">${esc(s.name)}</div>${line('เช้า')}${line('บ่าย')}${line('อื่นๆ')}</div>`;
       }).join('');
@@ -587,23 +605,32 @@
     whoBoxes().forEach(b => { b.checked = b.value === it.Name; b.disabled = b.value !== it.Name; });
     syncPeople();
     $('s_activity').value = it.Activity || ''; $('s_note').value = it.Note || '';
-    setLoc(it.Location || META.locations[0]);
+    $('s_meeting').value = it.MeetingType || '';
+    setLoc(META.locations.includes(it.Location) ? it.Location : META.locations[0]);
+    syncMeetingLocation();
     $('s_del').classList.remove('hidden'); $('s_dateTo').disabled = true;
     showTab('add');
   }
   function resetForm() {
     $('f').reset(); $('s_id').value = ''; $('s_date').value = CUR || META.today; $('s_dateTo').disabled = false;
     $('s_del').classList.add('hidden'); setLoc(META.locations[0]);
+    syncMeetingLocation();
     whoBoxes().forEach(b => { b.checked = false; b.disabled = false; });
     $('s_notify').checked = false; syncPeople();
   }
   const getLoc = () => (document.querySelector('input[name=s_loc]:checked') || {}).value || META.locations[0];
   const setLoc = v => document.querySelectorAll('input[name=s_loc]').forEach(r => r.checked = r.value === v);
+  function syncMeetingLocation() {
+    const location = (META.meetingLocations || {})[$('s_meeting').value];
+    $('s_loc').classList.toggle('hidden', Boolean(location));
+    $('s_meetingLocation').classList.toggle('hidden', !location);
+    $('s_meetingLocation').textContent = location || '';
+  }
   async function saveSchedule(ev) {
     ev.preventDefault();
     const names = whoChecked();
     const item = { id: $('s_id').value, date: $('s_date').value, name: names[0], shift: $('s_shift').value,
-      activity: $('s_activity').value, note: $('s_note').value, location: getLoc() };
+      activity: $('s_activity').value, note: $('s_note').value, location: getLoc(), meetingType: $('s_meeting').value };
     const to = $('s_dateTo').value;
     if (!names.length) { toast('กรุณาเลือกแพทย์อย่างน้อย 1 คน', true); return false; }
     if (to && to < item.date) { toast('วันสิ้นสุดต้องไม่ก่อนวันเริ่ม', true); return false; }
